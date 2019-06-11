@@ -6,7 +6,7 @@ const SCREEN_HEIGHT: i32 = 50;
 const LIMIT_FPS: i32 = 20;
 const MAP_WIDTH: i32 = 80;
 const MAP_HEIGHT: i32 = 45;
-const COLOR_DARK_WALL: Color = Color { r: 75, g: 75, b: 75 };
+const COLOR_DARK_WALL: Color = Color { r: 10, g: 75, b: 10 };
 const COLOR_DARK_GROUND: Color = Color { r: 0, g: 0, b: 0 };
 
 
@@ -42,10 +42,20 @@ impl Object {
 
     pub fn move_d(&mut self, d: Directions, map: &Map) {
         let tgt_pos = get_direction(self.position.x, self.position.y, d);
-        if !map[tgt_pos.x as usize][tgt_pos.y as usize].blocked {
+        if self.can_move(&tgt_pos, map) {
             self.position = tgt_pos;
         }
 
+    }
+
+    pub fn can_move(&self, pos: &Point, map: &Map) -> bool {
+        if !out_of_bounds(&pos) {
+            if !map[pos.x as usize][pos.y as usize].blocked {
+                return true
+            }
+        }
+
+        false
     }
 }
 
@@ -145,6 +155,7 @@ fn handle_keys(root: &mut Root, player: &mut Object, map: &Map) -> bool {
 }
 
 fn get_direction(x: i32, y: i32, d: Directions) -> Point {
+    // chooses direction and calculates target point
     match d {
         Directions::NORTH => Point::new(x, y - 1),
         Directions::SOUTH => Point::new(x, y + 1),
@@ -160,6 +171,14 @@ fn make_map() -> Map {
     map[50][22] = Tile::wall();
 
     map
+}
+
+fn out_of_bounds(pos: &Point) -> bool {
+    if pos.x < MAP_WIDTH && pos.y < MAP_HEIGHT {
+        return false
+    }
+
+    true
 }
 
 fn render_all(root: &mut Root, con: &mut Offscreen, objects: &[Object], map: &Map) {
