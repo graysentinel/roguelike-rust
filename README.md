@@ -2,7 +2,9 @@
 
 This is an implementation of the Rust Roguelike tutorial from [this](https://tomassedovic.github.io/roguelike-tutorial/) tutorial provided by Tomas Sedovic.
 
-It has a few idiosyncracies and things implemented differently as I personally use this as a launching point to learn more about the Rust language and what it has to offer.
+It has a few idiosyncracies and things implemented differently, as I am personally using this as a launching point to learn more about the Rust language and what it has to offer.
+
+So far, I have to say (as somebody who is dangerous in C# but only mostly Python-fluent) I LIKE WHAT I SEE! =)
 
 This project is undertaken as part of the 2019 [r/roguelikedev does the Roguelike Tutorial 2019](https://www.reddit.com/r/roguelikedev/comments/br1sv3/roguelikedev_does_the_complete_roguelike_tutorial/) as a learning process for myself.
 
