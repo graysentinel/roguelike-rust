@@ -86,15 +86,20 @@ enum Directions {
 struct Tile {
     blocked: bool,
     block_sight: bool,
+    explored: bool,
 }
 
 impl Tile {
     pub fn empty() -> Self {
-        Tile{blocked: false, block_sight: false}
+        Tile{blocked: false, block_sight: false, explored: false}
     }
 
     pub fn wall() -> Self {
-        Tile{blocked: true, block_sight: true}
+        Tile{blocked: true, block_sight: true, explored: false}
+    }
+
+    pub fn explore(&mut self) {
+        self.explored = true;
     }
 }
 
@@ -145,7 +150,7 @@ fn main() {
     let mut con = Offscreen::new(SCREEN_WIDTH, SCREEN_HEIGHT);
     
     tcod::system::set_fps(LIMIT_FPS);
-    let (map, start_pos) = make_map();
+    let (mut map, start_pos) = make_map();
     let player = Object::new(start_pos, '@', WHITE);
     let mut objects = [player];
 
@@ -157,19 +162,39 @@ fn main() {
         con.set_default_foreground(WHITE);
         con.clear();
         let fov_recompute = previous_player_position != player.position;
-        render_all(&mut root, &mut con, &objects, &map, &mut fov_map, fov_recompute);
+        //println!("{}", fov_recompute);
+        //run_fov(&player.position, &mut fov_map, &mut map, fov_recompute);
+        render_all(&mut root, &mut con, &objects, &mut map, &mut fov_map, fov_recompute);
         root.flush();
         let player = &mut objects[0];
         previous_player_position = Point::new(player.position.x, player.position.y);
+        //println!("Before Move: {:?}", previous_player_position);
         let exit = handle_keys(&mut root, player, &map);
         if exit {
             break
         }
+        //println!("After Move: {:?}", player.position);
     }
 }
 
 
 // Subroutines
+/* fn run_fov(pos: &Point, fov_map: &mut FovMap, map: &mut Map, fov_recompute: bool) {
+    if fov_recompute {
+        println!{"Recomputing FOV"};
+        fov_map.compute_fov(pos.x, pos.y, TORCH_RADIUS, FOV_LIGHT_WALLS, FOV_ALGO);
+    }
+        for y in 0..MAP_HEIGHT {
+            for x in 0..MAP_WIDTH {
+                let visible = fov_map.is_in_fov(x, y);
+                if visible {
+                    let current_tile = &mut map[x as usize][y as usize];
+                    current_tile.explore();
+                }
+            }
+    }
+} */
+
 fn handle_keys(root: &mut Root, player: &mut Object, map: &Map) -> bool {
     use tcod::input::Key;
     use tcod::input::KeyCode::*;
@@ -226,27 +251,33 @@ fn out_of_bounds(pos: &Point) -> bool {
 fn render_all(root: &mut Root, 
     con: &mut Offscreen, 
     objects: &[Object], 
-    map: &Map,
+    map: &mut Map,
     fov_map: &mut FovMap,
     fov_recompute: bool,
 ) {
     if fov_recompute {
         let player = &objects[0];
         fov_map.compute_fov(player.position.x, player.position.y, TORCH_RADIUS, FOV_LIGHT_WALLS, FOV_ALGO);
-    }
-    //draw all objects in the list
+    } 
 
     for y in 0..MAP_HEIGHT {
         for x in 0..MAP_WIDTH {
             let visible = fov_map.is_in_fov(x, y);
             let wall = map[x as usize][y as usize].block_sight;
+            let explored = &mut map[x as usize][y as usize].explored;
+            if visible {
+                *explored = true;
+            }
             let color = match (visible, wall) {
                 (false, true) => COLOR_DARK_WALL,
                 (false, false) => COLOR_DARK_GROUND,
                 (true, true) => COLOR_LIGHT_WALL,
                 (true, false) => COLOR_LIGHT_GROUND,
             };
-            con.set_char_background(x, y, color, BackgroundFlag::Set);
+            if *explored {
+                con.set_char_background(x, y, color, BackgroundFlag::Set);
+            }
+
         }
     }
 
