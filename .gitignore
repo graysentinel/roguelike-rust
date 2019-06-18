@@ -2,3 +2,4 @@
 **/*.rs.bk
 *.code-workspace
 *.lock
+TCOD-Reference.txt

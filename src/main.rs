@@ -97,10 +97,10 @@ impl Tile {
     pub fn wall() -> Self {
         Tile{blocked: true, block_sight: true, explored: false}
     }
-
+/* 
     pub fn explore(&mut self) {
         self.explored = true;
-    }
+    } */
 }
 
 type Map = Vec<Vec<Tile>>;
@@ -151,7 +151,7 @@ fn main() {
     
     tcod::system::set_fps(LIMIT_FPS);
     let (mut map, start_pos) = make_map();
-    let player = Object::new(start_pos, '@', WHITE);
+    let player = Object::new(start_pos, '@', DARK_GREEN);
     let mut objects = [player];
 
     let mut fov_map = FovMap::new(MAP_WIDTH, MAP_HEIGHT);
@@ -259,7 +259,9 @@ fn render_all(root: &mut Root,
         let player = &objects[0];
         fov_map.compute_fov(player.position.x, player.position.y, TORCH_RADIUS, FOV_LIGHT_WALLS, FOV_ALGO);
     } 
-
+    let characters = vec!['!', '#', '$', '&', '*', '+', '/', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+                          '[', ']', '{', '}', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+                          'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'];
     for y in 0..MAP_HEIGHT {
         for x in 0..MAP_WIDTH {
             let visible = fov_map.is_in_fov(x, y);
@@ -277,7 +279,15 @@ fn render_all(root: &mut Root,
             if *explored {
                 con.set_char_background(x, y, color, BackgroundFlag::Set);
             }
-
+            else {
+                let random_chance = rand::thread_rng().gen_range(0, 100);
+                if random_chance < 10 {
+                    let random_index = rand::thread_rng().gen_range(0, characters.len());
+                    let chosen_char = &characters[random_index];
+                    con.set_default_foreground(COLOR_DARK_WALL);
+                    con.put_char(x, y, *chosen_char, BackgroundFlag::Set);
+                }
+            }
         }
     }
 
