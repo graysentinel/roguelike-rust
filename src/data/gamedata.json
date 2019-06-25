@@ -1,0 +1,23 @@
+{ 
+"player" : {
+    "max_hp": 30,
+    "hp": 30,
+    "defense": 2,
+    "power": 5,
+    "on_death": "Player"
+},
+"worm": {
+     "max_hp": 10,
+     "hp": 10,
+     "defense": 0,
+     "power": 3,
+     "on_death": "Monster"
+  },
+  "virus": {
+      "max_hp": 16,
+      "hp": 16,
+      "defense": 1,
+      "power": 4,
+      "on_death": "Monster"
+  }
+}

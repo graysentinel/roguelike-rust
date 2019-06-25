@@ -3,22 +3,18 @@ use tcod::console::*;
 use tcod::map::{FovAlgorithm, Map as FovMap};
 use std::cmp;
 use rand::Rng;
+use serde::{Serialize, Deserialize};
+use serde_json::{Result, Value};
 
 const SCREEN_WIDTH: i32 = 90;
 const SCREEN_HEIGHT: i32 = 50;
 const LIMIT_FPS: i32 = 20;
 const MAP_WIDTH: i32 = 80;
 const MAP_HEIGHT: i32 = 45;
-const COLOR_DARK_WALL: Color = Color { r: 10, g: 55, b: 10 };
-const COLOR_LIGHT_WALL: Color = Color {
-    r: 30, g: 100, b: 30
-};
-const COLOR_DARK_GROUND: Color = Color { r: 5, g: 15, b: 5 };
-const COLOR_LIGHT_GROUND: Color = Color {
-    r: 7,
-    g: 35,
-    b: 7
-};
+const COLOR_DARK_WALL: Color = Color {r: 10, g: 55, b: 10};
+const COLOR_LIGHT_WALL: Color = Color {r: 30, g: 100, b: 30};
+const COLOR_DARK_GROUND: Color = Color {r: 5, g: 15, b: 5};
+const COLOR_LIGHT_GROUND: Color = Color {r: 7,g: 35,b: 7};
 const ROOM_MAX_SIZE: i32 = 10;
 const ROOM_MIN_SIZE: i32 = 6;
 const MAX_ROOMS: i32 = 30;
@@ -29,21 +25,10 @@ const TORCH_RADIUS: i32 = 3;
 const MAX_ROOM_MONSTERS: i32 = 3;
 
 const PLAYER: usize = 0;
+const GAME_DATA: &str = include_str!("data/gamedata.json");
 
 
 // Data Types
-#[derive(Debug, PartialEq, Copy, Clone)]
-struct Point {
-    x: i32,
-    y: i32,
-}
-
-impl Point {
-    pub fn new(x: i32, y: i32) -> Self {
-        Point {x, y}
-    }
-}
-
 #[derive(Debug)]
 struct Object {
     x: i32,
@@ -54,11 +39,45 @@ struct Object {
     id: i32,
     blocks: bool,
     alive: bool,
+    fighter: Option<Fighter>,
+    ai: Option<Ai>,
 }
 
 impl Object {
     pub fn new(x: i32, y: i32, name: &str, ch: char, color: Color, id: i32, blocks: bool, alive: bool) -> Self {
-        Object { x, y, name: name.into(), character: ch, color, id, blocks, alive }
+        Object { x, y, name: name.into(), character: ch, color, id, blocks, alive, fighter: None, ai: None }
+    }
+
+    pub fn new_player(x: i32, y: i32, name: &str, ch: char, color: Color, id: i32, blocks: bool, alive: bool) -> Self {
+        let player_fighter = Fighter::new(name);
+        Object {
+            x,
+            y,
+            name: name.into(),
+            character: ch,
+            color,
+            id,
+            blocks,
+            alive,
+            fighter: Some(player_fighter),
+            ai: None
+        }
+    }
+
+    pub fn new_monster(x: i32, y: i32, name: &str, ch: char, color: Color, id: i32, blocks: bool, alive: bool) -> Self {
+        let monster_fighter = Fighter::new(name);
+        Object {
+            x,
+            y,
+            name: name.into(),
+            character: ch,
+            color,
+            id,
+            blocks,
+            alive,
+            fighter: Some(monster_fighter),
+            ai: Some(Ai),
+        }
     }
 
     pub fn draw(&self, con: &mut Console) {
@@ -73,7 +92,44 @@ impl Object {
     pub fn set_pos(&mut self, x: i32, y: i32) {
         self.x = x;
         self.y = y;
-        println!("Position: ({}, {})", self.x, self.y);
+        //println!("Position: ({}, {})", self.x, self.y);
+    }
+    
+    pub fn distance_to(&self, other: &Object) -> f32 {
+        let dx = other.x - self.x;
+        let dy = other.y - self.y;
+        distance(dx, dy)
+    }
+
+    pub fn take_damage(&mut self, damage: i32) {
+        if let Some(fighter) = self.fighter.as_mut() {
+            if damage > 0 {
+                fighter.hp -= damage;
+            }
+        }
+        
+        if let Some(fighter) = self.fighter {
+            if fighter.hp <= 0 {
+                self.alive = false;
+                fighter.on_death.callback(self);
+            }
+        }
+    }
+
+    pub fn attack(&mut self, target: &mut Object) {
+        let damage = self.fighter.map_or(0, |f| f.power) - target.fighter.map_or(0, |f| f.defense);
+        if damage > 0 {
+            println!(
+                "{} attacks {} for {} hit points",
+                self.name, target.name, damage
+            );
+            target.take_damage(damage);
+        } else {
+            println!(
+                "{} attacks {} but it has no effect!",
+                self.name, target.name
+            );
+        }
     }
 }
 
@@ -128,10 +184,10 @@ impl Rect {
         }
     }
 
-    pub fn center(&self) -> Point {
+    pub fn center(&self) -> (i32, i32) {
         let center_x = (self.x1 + self.x2) / 2;
         let center_y = (self.y1 + self.y2) / 2;
-        Point::new(center_x, center_y)
+        (center_x, center_y)
     }
 
     pub fn intersects_with(&self, other: &Rect) -> bool {
@@ -141,6 +197,50 @@ impl Rect {
             && (self.y2 >= other.y1)
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+struct Fighter {
+    max_hp: i32,
+    hp: i32,
+    defense: i32,
+    power: i32,
+    on_death: DeathCallback
+}
+
+impl Fighter {
+    pub fn new(name: &str) -> Self {
+        let fighter_data = extract_node_from_gamedata(&name).unwrap();
+        let fighter: Fighter = serde_json::from_value(fighter_data).unwrap();
+        fighter
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+enum DeathCallback {
+    Player,
+    Monster,
+}
+
+impl DeathCallback {
+    fn callback(self, object: &mut Object) {
+        use DeathCallback::*;
+        let callback: fn(&mut Object) = match self {
+            Player => player_death,
+            Monster => monster_death,
+        };
+        callback(object);
+    }
+}
+
+fn extract_node_from_gamedata(node: &str) -> Result<Value> {
+    let game_data: Value = serde_json::from_str(&GAME_DATA)?;
+    let target_node: Value = game_data[node].clone();
+
+    Ok(target_node)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Ai;
 
 
 // Main Function
@@ -155,7 +255,7 @@ fn main() {
     let mut con = Offscreen::new(SCREEN_WIDTH, SCREEN_HEIGHT);
     
     tcod::system::set_fps(LIMIT_FPS);
-    let player = Object::new(0, 0, "player", '@', DARK_GREEN, 0, true, true);
+    let player = Object::new_player(0, 0, "player", '@', DARK_GREEN, 0, true, true);
 
     let mut objects = vec![player];
     let mut map = make_map(&mut objects);
@@ -174,9 +274,9 @@ fn main() {
         match player_action {
             PlayerAction::Exit => break,
             PlayerAction::TookTurn => {
-                for object in &objects {
-                    if object.id != objects[PLAYER].id {
-                        println!("The {} growls!", object.name)
+                for id in 0..objects.len() {
+                    if objects[id].ai.is_some() {
+                        ai_take_turn(id, &map, &mut objects, &fov_map)
                     }
                 }
             },
@@ -228,8 +328,10 @@ fn handle_keys(root: &mut Root, map: &Map, objects: &mut [Object]) -> PlayerActi
     }
 }
 
+// Movement Functions
+
 fn get_direction(d: Directions) -> (i32, i32) {
-    // chooses direction and calculates target point
+    // chooses direction
     match d {
         Directions::NORTH => (0, -1),
         Directions::SOUTH => (0, 1),
@@ -255,20 +357,18 @@ fn move_by(id: usize, (dx, dy): (i32, i32), map: &Map, objects: &mut [Object]) {
 
 }
 
-fn player_move_or_attack((dx, dy): (i32, i32), map: &Map, objects: &mut [Object]) {
-    let x = objects[PLAYER].x + dx;
-    let y = objects[PLAYER].y + dy;
+fn move_towards(id: usize, (target_x, target_y): (i32, i32), map: &Map, objects: &mut [Object]) {
+    let dx = target_x - objects[id].x;
+    let dy = target_y - objects[id].y;
+    let distance = distance(dx, dy);
 
-    let target_id = objects.iter().position(|object| object.pos() == (x, y));
+    let dx = (dx as f32 / distance).round() as i32;
+    let dy = (dy as f32 / distance).round() as i32;
+    move_by(id, (dx, dy), map, objects);
+}
 
-    match target_id {
-        Some(target_id) => {
-            println!("The {} laughs at your puny efforts to attack!", objects[target_id].name)
-        }
-        None => {
-            move_by(PLAYER, (dx, dy), map, objects);
-        }
-    }
+fn distance(dx: i32, dy: i32) -> f32 {
+    ((dx.pow(2) + dy.pow(2)) as f32).sqrt()
 }
 
 fn is_blocked(x: i32, y: i32, map: &Map, objects: &[Object]) -> bool {
@@ -281,6 +381,74 @@ fn is_blocked(x: i32, y: i32, map: &Map, objects: &[Object]) -> bool {
         .iter()
         .any(|object| object.blocks && object.pos() == (x, y))
 }
+
+// Player Functions
+
+fn player_move_or_attack((dx, dy): (i32, i32), map: &Map, objects: &mut [Object]) {
+    let x = objects[PLAYER].x + dx;
+    let y = objects[PLAYER].y + dy;
+
+    let target_id = objects
+        .iter()
+        .position(|object| object.fighter.is_some() && object.pos() == (x, y));
+
+    match target_id {
+        Some(target_id) => {
+            let (player, target) = mut_two(PLAYER, target_id, objects);
+            player.attack(target);
+        }
+        None => {
+            move_by(PLAYER, (dx, dy), map, objects);
+        }
+    }
+}
+
+fn player_death(player: &mut Object) {
+    println!("You DIED");
+
+    player.character = '%';
+    player.color = DARK_GREY;
+}
+
+// AI Functions
+
+fn ai_take_turn(monster_id: usize, map: &Map, objects: &mut [Object], fov_map: &FovMap) {
+    let (monster_x, monster_y) = objects[monster_id].pos();
+    if fov_map.is_in_fov(monster_x, monster_y) {
+        if objects[monster_id].distance_to(&objects[PLAYER]) >= 2.0 {
+            let (player_x, player_y) = objects[PLAYER].pos();
+            move_towards(monster_id, (player_x, player_y), map, objects);
+        } else if objects[PLAYER].fighter.map_or(false, |f| f.hp > 0) {
+            let (monster, player) = mut_two(monster_id, PLAYER, objects);
+            monster.attack(player);
+        }
+    }
+}
+
+fn monster_death(monster: &mut Object) {
+    println!("{} died!", monster.name);
+    monster.character = '%';
+    monster.color = DARK_GREY;
+    monster.blocks = false;
+    monster.fighter = None;
+    monster.ai = None;
+    monster.name = format!("remains of {}", monster.name);
+}
+
+// System Functions
+
+fn mut_two<T>(first_index: usize, second_index: usize, items: &mut [T]) -> (&mut T, &mut T) {
+    assert!(first_index != second_index);
+    let split_at_index = cmp::max(first_index, second_index);
+    let (first_slice, second_slice) = items.split_at_mut(split_at_index);
+    if first_index < second_index {
+        (&mut first_slice[first_index], &mut second_slice[0])
+    } else {
+        (&mut second_slice[0], &mut first_slice[second_index])
+    }
+}
+
+// Rendering
 
 fn render_all(root: &mut Root, 
     con: &mut Offscreen, 
@@ -325,10 +493,23 @@ fn render_all(root: &mut Root,
         }
     }
 
-    for object in objects {
-        if fov_map.is_in_fov(object.x, object.y) {
-            object.draw(con);
-        }
+    let mut to_draw: Vec<_> = objects
+        .iter()
+        .filter(|o| fov_map.is_in_fov(o.x, o.y))
+        .collect();
+    to_draw.sort_by(|o1, o2| {o1.blocks.cmp(&o2.blocks) });
+    for object in &to_draw {
+        object.draw(con);
+    }
+
+    if let Some(fighter) = objects[PLAYER].fighter {
+        root.print_ex(
+            1,
+            SCREEN_HEIGHT - 2,
+            BackgroundFlag::None,
+            TextAlignment::Left,
+            format!("HP: {}/{}", fighter.hp, fighter.max_hp),
+        );
     }
 
     blit(con, (0, 0), (MAP_WIDTH, MAP_HEIGHT), root, (0, 0), 1.0, 1.0);
@@ -346,6 +527,7 @@ fn create_fov(fov: &mut FovMap, map: &Map) {
         }
     }
 }
+
 
 // Map Functions
 
@@ -372,15 +554,15 @@ fn make_map(objects: &mut Vec<Object>) -> Map {
             let room_center = new_room.center();
 
             if rooms.is_empty() {
-                objects[PLAYER].set_pos(room_center.x, room_center.y);
+                objects[PLAYER].set_pos(room_center.0, room_center.1);
             } else {
                 let prev_center = rooms[rooms.len() - 1].center();
                 if rand::random() {
-                    create_h_tunnel(prev_center.x, room_center.x, prev_center.y, &mut map);
-                    create_v_tunnel(prev_center.y, room_center.y, room_center.x, &mut map);
+                    create_h_tunnel(prev_center.0, room_center.0, prev_center.1, &mut map);
+                    create_v_tunnel(prev_center.1, room_center.1, room_center.0, &mut map);
                 } else {
-                    create_v_tunnel(prev_center.y, room_center.y, prev_center.x, &mut map);
-                    create_h_tunnel(prev_center.x, room_center.x, room_center.y, &mut map);
+                    create_v_tunnel(prev_center.1, room_center.1, prev_center.0, &mut map);
+                    create_h_tunnel(prev_center.0, room_center.0, room_center.1, &mut map);
                 }
             }
 
@@ -419,9 +601,9 @@ fn place_objects(room: Rect, objects: &mut Vec<Object>) {
         let y = rand::thread_rng().gen_range(room.y1 + 1, room.y2);
 
         let monster = if rand::random::<f32>() < 0.8 {
-            Object::new(x, y, "worm", 'w', DESATURATED_GREEN, get_new_object_id(&objects), true, true)
+            Object::new_monster(x, y, "worm", 'w', DESATURATED_GREEN, get_new_object_id(&objects), true, true)
         } else {
-            Object::new(x, y, "virus", 'v', DARKER_GREEN, get_new_object_id(&objects), true, true)
+            Object::new_monster(x, y, "virus", 'v', DARKER_GREEN, get_new_object_id(&objects), true, true)
         };
 
         objects.push(monster);
