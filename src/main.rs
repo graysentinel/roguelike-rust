@@ -799,9 +799,12 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
         if v.is_empty() {
             return None
         } else {
-            let mut index_option = r.next_u32() % 10;
+            let vec_length: f64 = v.len() as f64;
+            let num_digits = vec_length.log10().round() as u32;
+            let modulo: u32 = (10 as u32).pow(num_digits);
+            let mut index_option = r.next_u32() % modulo;
             while v.len()-1 < index_option as usize {
-                index_option = r.next_u32() % 10;
+                index_option = r.next_u32() % modulo;
             }
             return Some(index_option as usize)
         }
@@ -811,9 +814,12 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
         if v.is_empty() {
             return None
         } else {
-            let mut index_option = r.next_u32() % 10;
+            let vec_length: f64 = v.len() as f64;
+            let num_digits = vec_length.log10().round() as u32;
+            let modulo: u32 = (10 as u32).pow(num_digits);
+            let mut index_option = r.next_u32() % modulo;
             while v.len()-1 < index_option as usize {
-                index_option = r.next_u32() % 10;
+                index_option = r.next_u32() % modulo;
             }
             return Some(index_option as usize)
         }
@@ -876,16 +882,12 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
     }
 
     fn pcg_range(r: &mut rand_pcg::Pcg32, min: i32, max: i32) -> i32 {
-        let max_places = max.to_string().len();
-        let mut modulo = String::from("1");
-        for _ in 0..max_places {
-            modulo.push('0');
-        }
+        let num_digits = (max as f32).log10().round() as u32;
+        let modulo: u32 = (10 as u32).pow(num_digits);
 
-        let modulus = modulo.parse::<u32>().unwrap();
         let mut result: i32 = max + 1;
         while !(result > min && result < max) {
-            let pcg = r.next_u32() % modulus;
+            let pcg = r.next_u32() % modulo;
             result = pcg as i32;
         }
         
@@ -944,7 +946,7 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
         }
 
         let mut connectors: Vec<_> = connector_regions.keys().collect();
-        //connectors.sort();
+        connectors.sort();
         //println!("{:?}", connectors);
 
         let mut merged = HashMap::new();
