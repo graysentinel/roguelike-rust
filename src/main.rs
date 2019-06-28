@@ -7,7 +7,7 @@ use serde::{Serialize, Deserialize};
 use serde_json::{Result, Value};
 use std::collections::HashMap;
 use std::slice::Iter;
-use rand::seq::SliceRandom;
+use rand_core::RngCore;
 
 const SCREEN_WIDTH: i32 = 90;
 const SCREEN_HEIGHT: i32 = 50;
@@ -36,7 +36,7 @@ const PANEL_Y: i32 = SCREEN_HEIGHT - PANEL_HEIGHT;
 
 
 // Data Types
-#[derive(Debug, Clone, Copy, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Hash, Eq, PartialOrd, Ord)]
 struct Point {
     x: i32,
     y: i32,
@@ -758,14 +758,26 @@ fn get_new_object_id(objects: &Vec<Object>) -> i32 {
 fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
 
     let num_room_tries = 100;
-    let extra_connector_chance = 4;
+    let extra_connector_chance = 25;
     //let room_extra_size = 0;
     let winding_percent = 10;
 
-    let current_region: i32 = -1;
+    let mut current_region: i32 = -1;
 
     let mut map_width: i32 = MAP_WIDTH;
     let mut map_height: i32 = MAP_HEIGHT;
+
+    // let seed: u64 = 0xcafef00dd15ea5e5;
+    // let state: u64 = 0xa02bdbf7bb3c0a7;
+
+    /* let mut seed_rng = rand::thread_rng();
+    let state: u64 = seed_rng.gen();
+    let stream: u64 = seed_rng.gen(); */
+
+    let state: u64 = 0x844cfa4bf95ef68;
+    let stream: u64 = 0x2a04cd05868ddbcd;
+    println!("Using seed: {:#x} & state: {:#x}", state, stream);
+    let mut r = rand_pcg::Pcg32::new(state, stream);
 
     if map_width % 2 == 0 {
         map_width -= 1;
@@ -783,7 +795,32 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
 
     //fn on_decorate_room(room: Rect) {}
 
-    fn grow_maze(map: &mut Map, start: Point, current_region: i32, winding_percent: i32, _regions: &mut VecRegion) {
+    fn pcg_choose(v: &Vec<(i32, i32)>, r: &mut rand_pcg::Pcg32) -> Option<usize> {
+        if v.is_empty() {
+            return None
+        } else {
+            let mut index_option = r.next_u32() % 10;
+            while v.len()-1 < index_option as usize {
+                index_option = r.next_u32() % 10;
+            }
+            return Some(index_option as usize)
+        }
+    }
+
+    fn pcg_choose_pt(v: &Vec<&Point>, r: &mut rand_pcg::Pcg32) -> Option<usize> {
+        if v.is_empty() {
+            return None
+        } else {
+            let mut index_option = r.next_u32() % 10;
+            while v.len()-1 < index_option as usize {
+                index_option = r.next_u32() % 10;
+            }
+            return Some(index_option as usize)
+        }
+    }
+
+    fn grow_maze(map: &mut Map, start: Point, current_region: &mut i32, winding_percent: i32, _regions: &mut VecRegion,
+                 r: &mut rand_pcg::Pcg32) {
         let mut cells = Vec::new();
         let mut last_dir = (0, 0);
 
@@ -806,14 +843,19 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
 
             if !unmade_cells.is_empty() {
                 let mut dir = (0, 0);
-                if unmade_cells.contains(&last_dir) && rand::thread_rng().gen_range(0, 100) > winding_percent {
+                if unmade_cells.contains(&last_dir) && (r.next_u32() % 100) > winding_percent as u32 {
                     dir = last_dir;
                 } else {
-                    let dir_choice = unmade_cells.choose(&mut rand::thread_rng());
+                    let index_option = pcg_choose(&unmade_cells, r);
+                    match index_option {
+                        Some(i) => {dir = unmade_cells[i];}
+                        None => ()
+                    }
+                    /* let dir_choice = unmade_cells.choose(&mut rand::thread_rng());
                     match dir_choice {
                         Some(d) => {dir = *d;}
                         None => ()
-                    }
+                    } */
                 }
 
                 let close_pos = Point::new(cell.x + dir.0, cell.y + dir.1);
@@ -833,14 +875,31 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
 
     }
 
-    fn add_rooms(objects: &mut Vec<Object>, map: &mut Map, tries: i32, current_region: i32, _regions: &mut VecRegion,
-                 map_width: i32, map_height: i32) {
+    fn pcg_range(r: &mut rand_pcg::Pcg32, min: i32, max: i32) -> i32 {
+        let max_places = max.to_string().len();
+        let mut modulo = String::from("1");
+        for _ in 0..max_places {
+            modulo.push('0');
+        }
+
+        let modulus = modulo.parse::<u32>().unwrap();
+        let mut result: i32 = max + 1;
+        while !(result > min && result < max) {
+            let pcg = r.next_u32() % modulus;
+            result = pcg as i32;
+        }
+        
+        result
+    }
+
+    fn add_rooms(objects: &mut Vec<Object>, map: &mut Map, tries: i32, current_region: &mut i32, _regions: &mut VecRegion,
+                 map_width: i32, map_height: i32, r: &mut rand_pcg::Pcg32) {
         let mut rooms = Vec::new();
-        for i in 0..=tries {
-            let w = rand::thread_rng().gen_range(ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
-            let h = rand::thread_rng().gen_range(ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
-            let x = (rand::thread_rng().gen_range(0, map_width - w - 1) / 2)* 2 + 1;
-            let y = (rand::thread_rng().gen_range(0, map_height - h - 1) / 2) * 2 + 1;
+        for _ in 0..=tries {
+            let w = pcg_range(r, ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
+            let h = pcg_range(r, ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
+            let x = (pcg_range(r, 0, map_width - w - 1) / 2)* 2 + 1;
+            let y = (pcg_range(r, 0, map_height - h - 1) / 2) * 2 + 1;
 
             let new_room = Rect::new(x, y, w, h);
 
@@ -863,7 +922,8 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
     }
 
     fn connect_regions(map: &mut Map, _regions: &mut VecRegion, current_region: i32, extra_chance: i32,
-                       map_width: i32, map_height: i32) {
+                       map_width: i32, map_height: i32, r: &mut rand_pcg::Pcg32) {
+                           
         let mut connector_regions = HashMap::new();
 
         for x in 1..map_width-1 {
@@ -884,38 +944,65 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
         }
 
         let mut connectors: Vec<_> = connector_regions.keys().collect();
+        //connectors.sort();
+        //println!("{:?}", connectors);
 
         let mut merged = HashMap::new();
         let mut open_regions = Vec::new();
+
+        //println!("{}", current_region);
 
         for i in 0..current_region {
             merged.insert(i, i);
             open_regions.push(i);
         }
 
-        while open_regions.len() > 1 {
-            let connector = connectors.choose(&mut rand::thread_rng());
+        //println!("{:?}", open_regions);
+
+        while !open_regions.is_empty() {
+            let connector_idx = pcg_choose_pt(&connectors, r);
             let mut regions = Vec::new();
-            match connector {
-                Some(connector) => {
-                    add_junction(connector, map, _regions, current_region);
-                    for region in &connector_regions[connector] {
-                        let actual_region = merged[&region];
-                        regions.push(actual_region);
+            match connector_idx {
+                Some(c) => {
+                    let connector = connectors[c];
+                    add_junction(connector, map/*, _regions, current_region, r*/);
+                    if connector_regions.contains_key(connector) {
+                        for region in &connector_regions[connector] {
+                            if merged.contains_key(&region) {
+                                let actual_region = merged[&region];
+                                regions.push(actual_region);
+                            }
+                        }
                     }
-                    let dest = regions.first().unwrap().clone();
+
+                    let dest = regions.first();
+                    let mut dest_region = 0;
+                    match dest {
+                        Some(region) => { dest_region = *region; }
+                        None => ()
+                    }
+
                     let sources: Vec<_> = regions[1..].iter().collect();
 
                     for i in 0..current_region {
                         if sources.contains(&&merged[&i]) {
-                            merged.remove(&i);
-                            merged.insert(i, dest);
+                            if merged.contains_key(&i) {
+                                merged.remove(&i);
+                                merged.insert(i, dest_region);
+                            }
                         }
                     }
 
                     for s in sources {
-                        let index = open_regions.iter().position(|x| *x == *s).unwrap();
-                        open_regions.remove(index);
+                        let index = open_regions.iter().position(|x| *x == *s);
+                        match index {
+                            Some(n) => { 
+                                if open_regions.len() >= n {
+                                    open_regions.remove(n); 
+                                }
+                            }
+                            None => ()
+                        }
                     }
 
                     let mut to_be_removed = Vec::new();
@@ -927,14 +1014,18 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
 
                         let mut local_regions = Vec::new();
                         for r in &connector_regions[connector] {
-                            let region_actual = merged[&r];
-                            local_regions.push(region_actual);
+                            if merged.contains_key(&r) {
+                                let region_actual = merged[&r];
+                                local_regions.push(region_actual);
+                            }
                         }
 
                         if local_regions.len() > 1 { continue; }
 
-                        if rand::thread_rng().gen_range(0, 100) < extra_chance {
-                            add_junction(pos, map, _regions, current_region);
+                        let new_junc = r.next_u32() % 100;
+                        //let new_junc: u32 = 1;
+                        if new_junc < extra_chance as u32 {
+                            add_junction(pos, map/*, _regions, current_region, r*/);
                         }
 
                         if local_regions.len() == 1 {
@@ -952,10 +1043,9 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
         
     }
 
-    fn add_junction(pos: &Point, map: &mut Map, _regions: &mut VecRegion, current_region: i32) {
-        if rand::random::<f32>() < 0.25 {
-            carve(pos, map, _regions, current_region);
-        }
+    fn add_junction(pos: &Point, map: &mut Map/*, _regions: &mut VecRegion, current_region: i32, r: &mut rand_pcg::Pcg32*/) {
+        //println!("Adding junction at: ({}, {})", pos.x, pos.y);
+        map[pos.x as usize][pos.y as usize] = Tile::empty();
     }
 
     fn remove_dead_ends(map: &mut Map, map_width: i32, map_height: i32) {
@@ -997,17 +1087,17 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
         return map[target_x as usize][target_y as usize].block_sight;
     }
 
-    fn start_region(i: i32) -> i32 {
-        i + 1
+    fn start_region(i: &mut i32) {
+        *i = *i + 1;
     }
 
-    fn carve(pos: &Point, map: &mut Map, _regions: &mut VecRegion, current_region: i32) {
+    fn carve(pos: &Point, map: &mut Map, _regions: &mut VecRegion, current_region: &mut i32) {
         map[pos.x as usize][pos.y as usize] = Tile::empty();
         //println!("Made ({}, {}) a floor tile", pos.x, pos.y);
-        _regions[pos.x as usize][pos.y as usize] = current_region;
+        _regions[pos.x as usize][pos.y as usize] = *current_region;
     }
 
-    fn create_room_hauberk(room: &Rect, map: &mut Map, _regions: &mut VecRegion, current_region: i32) {
+    fn create_room_hauberk(room: &Rect, map: &mut Map, _regions: &mut VecRegion, current_region: &mut i32) {
         for x in room.x1..room.x2 {
             for y in room.y1..room.y2 {
                 let target_point = Point::new(x, y);
@@ -1016,18 +1106,18 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
         }
     }
 
-    add_rooms(objects, &mut map, num_room_tries, current_region, &mut _regions, map_width, map_height);
+    add_rooms(objects, &mut map, num_room_tries, &mut current_region, &mut _regions, map_width, map_height, &mut r);
 
     for y in (1..map_height).step_by(2) {
         for x in (1..map_width).step_by(2) {
             if !map[x as usize][y as usize].block_sight { continue ; }
 
             let start = Point::new(x, y);
-            grow_maze(&mut map, start, current_region, winding_percent, &mut _regions);
+            grow_maze(&mut map, start, &mut current_region, winding_percent, &mut _regions, &mut r);
         }
     }
 
-    connect_regions(&mut map, &mut _regions, current_region, extra_connector_chance, map_width, map_height);
+    connect_regions(&mut map, &mut _regions, current_region, extra_connector_chance, map_width, map_height, &mut r);
 
     remove_dead_ends(&mut map, map_width, map_height);
 
