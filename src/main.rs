@@ -5,12 +5,15 @@ use std::cmp;
 use rand::Rng;
 use serde::{Serialize, Deserialize};
 use serde_json::{Result, Value};
+use std::collections::HashMap;
+use std::slice::Iter;
+use rand::seq::SliceRandom;
 
 const SCREEN_WIDTH: i32 = 90;
 const SCREEN_HEIGHT: i32 = 50;
 const LIMIT_FPS: i32 = 20;
 const MAP_WIDTH: i32 = 80;
-const MAP_HEIGHT: i32 = 45;
+const MAP_HEIGHT: i32 = 43;
 const COLOR_DARK_WALL: Color = Color {r: 10, g: 55, b: 10};
 const COLOR_LIGHT_WALL: Color = Color {r: 30, g: 100, b: 30};
 const COLOR_DARK_GROUND: Color = Color {r: 5, g: 15, b: 5};
@@ -27,8 +30,24 @@ const MAX_ROOM_MONSTERS: i32 = 3;
 const PLAYER: usize = 0;
 const GAME_DATA: &str = include_str!("data/gamedata.json");
 
+const BAR_WIDTH: i32 = 20;
+const PANEL_HEIGHT: i32 = 7;
+const PANEL_Y: i32 = SCREEN_HEIGHT - PANEL_HEIGHT;
+
 
 // Data Types
+#[derive(Debug, Clone, Copy, PartialEq, Hash, Eq)]
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+impl Point {
+    pub fn new(x: i32, y: i32) -> Self {
+        Point { x, y }
+    }
+}
+
 #[derive(Debug)]
 struct Object {
     x: i32,
@@ -138,6 +157,13 @@ enum Directions {
     SOUTH,
     EAST,
     WEST,
+}
+
+impl Directions {
+    pub fn iterator() -> Iter<'static, Directions> {
+        static DIRECTIONS: [Directions; 4] = [Directions::NORTH, Directions::SOUTH, Directions::EAST, Directions::WEST];
+        DIRECTIONS.into_iter()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -253,12 +279,14 @@ fn main() {
         .init();
     
     let mut con = Offscreen::new(SCREEN_WIDTH, SCREEN_HEIGHT);
+    let mut panel = Offscreen::new(SCREEN_WIDTH, PANEL_HEIGHT);
     
     tcod::system::set_fps(LIMIT_FPS);
     let player = Object::new_player(0, 0, "player", '@', DARK_GREEN, 0, true, true);
 
     let mut objects = vec![player];
-    let mut map = make_map(&mut objects);
+    let mut map = make_map_hauberk(&mut objects);
+    //let mut map = make_map(&mut objects);
 
     let mut fov_map = FovMap::new(MAP_WIDTH, MAP_HEIGHT);
     create_fov(&mut fov_map, &map);
@@ -267,10 +295,10 @@ fn main() {
     while !root.window_closed() {
         con.clear();
         let fov_recompute = previous_player_position != (objects[PLAYER].pos());
-        render_all(&mut root, &mut con, &objects, &mut map, &mut fov_map, fov_recompute);
+        render_all(&mut root, &mut con, &mut panel, &objects, &mut map, &mut fov_map, fov_recompute);
         root.flush();
         previous_player_position = objects[PLAYER].pos();
-        let player_action = handle_keys(&mut root, &map, &mut objects);
+        let player_action = handle_keys(&mut root, &mut map, &mut objects);
         match player_action {
             PlayerAction::Exit => break,
             PlayerAction::TookTurn => {
@@ -285,7 +313,7 @@ fn main() {
     }
 }
 
-fn handle_keys(root: &mut Root, map: &Map, objects: &mut [Object]) -> PlayerAction {
+fn handle_keys(root: &mut Root, map: &mut Map, objects: &mut [Object]) -> PlayerAction {
     use tcod::input::Key;
     use tcod::input::KeyCode::*;
     use PlayerAction::*;
@@ -307,20 +335,24 @@ fn handle_keys(root: &mut Root, map: &Map, objects: &mut [Object]) -> PlayerActi
             NoTurn
         }
         (Key { code: Escape, .. }, _) => return Exit,
+        (Key { code: F1, .. }, _) => {
+            reveal_map(map);
+            NoTurn
+        }
         (Key { code: Up, .. }, true) => {
-            player_move_or_attack(get_direction(NORTH), map, objects);
+            player_move_or_attack(get_direction(&NORTH), map, objects);
             TookTurn
         }
         (Key { code: Down, .. }, true) => {
-            player_move_or_attack(get_direction(SOUTH), map, objects);
+            player_move_or_attack(get_direction(&SOUTH), map, objects);
             TookTurn
         },
         (Key { code: Left, .. }, true) => {
-            player_move_or_attack(get_direction(WEST), map, objects);
+            player_move_or_attack(get_direction(&WEST), map, objects);
             TookTurn
         },
         (Key { code: Right, .. }, true) => {
-            player_move_or_attack(get_direction(EAST), map, objects);
+            player_move_or_attack(get_direction(&EAST), map, objects);
             TookTurn
         },
 
@@ -330,7 +362,7 @@ fn handle_keys(root: &mut Root, map: &Map, objects: &mut [Object]) -> PlayerActi
 
 // Movement Functions
 
-fn get_direction(d: Directions) -> (i32, i32) {
+fn get_direction(d: &Directions) -> (i32, i32) {
     // chooses direction
     match d {
         Directions::NORTH => (0, -1),
@@ -450,8 +482,9 @@ fn mut_two<T>(first_index: usize, second_index: usize, items: &mut [T]) -> (&mut
 
 // Rendering
 
-fn render_all(root: &mut Root, 
+fn render_all(root: &mut Root,
     con: &mut Offscreen, 
+    panel: &mut Offscreen,
     objects: &[Object], 
     map: &mut Map,
     fov_map: &mut FovMap,
@@ -502,15 +535,27 @@ fn render_all(root: &mut Root,
         object.draw(con);
     }
 
-    if let Some(fighter) = objects[PLAYER].fighter {
-        root.print_ex(
-            1,
-            SCREEN_HEIGHT - 2,
-            BackgroundFlag::None,
-            TextAlignment::Left,
-            format!("HP: {}/{}", fighter.hp, fighter.max_hp),
-        );
-    }
+    panel.set_default_background(BLACK);
+    panel.clear();
+
+    let hp = objects[PLAYER].fighter.map_or(0, |f| f.hp);
+    let max_hp = objects[PLAYER].fighter.map_or(0, |f| f.max_hp);
+    render_bar(
+        panel,
+        1,
+        1,
+        BAR_WIDTH,
+        "HP",
+        hp,
+        max_hp,
+        LIGHT_YELLOW,
+        DARKER_YELLOW,
+        DARKEST_GREY,
+    );
+
+    render_border(panel, DARKER_GREEN);
+
+    blit(panel, (0, 0), (SCREEN_WIDTH, PANEL_HEIGHT), root, (0, PANEL_Y), 1.0, 1.0);
 
     blit(con, (0, 0), (MAP_WIDTH, MAP_HEIGHT), root, (0, 0), 1.0, 1.0);
 }
@@ -525,6 +570,57 @@ fn create_fov(fov: &mut FovMap, map: &Map) {
                 !map[x as usize][y as usize].blocked,
             );
         }
+    }
+}
+
+fn render_bar(
+    panel: &mut Offscreen,
+    x: i32,
+    y: i32,
+    total_width: i32,
+    name: &str,
+    value: i32,
+    maximum: i32,
+    bar_color: Color,
+    back_color: Color,
+    text_color: Color,
+) {
+    let bar_width = (value as f32 / maximum as f32 * total_width as f32) as i32;
+
+    panel.set_default_background(back_color);
+    panel.rect(x, y, total_width, 1, false, BackgroundFlag::Screen);
+
+    panel.set_default_background(bar_color);
+    if bar_width > 0 {
+        panel.rect(x, y, bar_width, 1, false, BackgroundFlag::Screen);
+    }
+
+    panel.set_default_foreground(text_color);
+    panel.print_ex(
+        x + total_width / 2,
+        y,
+        BackgroundFlag::None,
+        TextAlignment::Center,
+        &format!("{}: {}/{}", name, value, maximum),
+    );
+}
+
+fn render_border(panel: &mut Offscreen, border_color: Color) {
+    panel.set_default_foreground(border_color);
+    // Add the 4 corners
+    panel.put_char(0, 0, 218u8 as char, BackgroundFlag::None);
+    panel.put_char(MAP_WIDTH, 0, 191u8 as char, BackgroundFlag::None);
+    panel.put_char(0, PANEL_HEIGHT-1, 192u8 as char, BackgroundFlag::None);
+    panel.put_char(MAP_WIDTH, PANEL_HEIGHT-1, 217u8 as char, BackgroundFlag::None);
+
+    // Draw top and bottom lines
+    for x in 1..MAP_WIDTH {
+        panel.put_char(x, 0, 196u8 as char, BackgroundFlag::None);
+        panel.put_char(x, PANEL_HEIGHT-1, 196u8 as char, BackgroundFlag::None);
+    }
+    for y in 1..PANEL_HEIGHT-1 {
+        panel.put_char(0, y, 179u8 as char, BackgroundFlag::None);
+        panel.put_char(MAP_WIDTH, y, 179u8 as char, BackgroundFlag::None);
     }
 }
 
@@ -549,9 +645,13 @@ fn make_map(objects: &mut Vec<Object>) -> Map {
             .any(|other_room| new_room.intersects_with(other_room));
         
         if !failed {
-            create_room(new_room, &mut map);
-            place_objects(new_room, objects);
+            if rand::random::<f32>() < 0.15 {
+                create_circle_room(new_room, &mut map);
+            } else {
+                create_room(new_room, &mut map);
+            }
             let room_center = new_room.center();
+            place_objects(new_room, objects);
 
             if rooms.is_empty() {
                 objects[PLAYER].set_pos(room_center.0, room_center.1);
@@ -577,6 +677,33 @@ fn create_room(room: Rect, map: &mut Map) {
     for x in (room.x1 + 1)..room.x2 {
         for y in (room.y1 + 1)..room.y2 {
             map[x as usize][y as usize] = Tile::empty();
+        }
+    }
+}
+
+fn create_circle_room(room: Rect, map: &mut Map) {
+    // Code from @Agka on roguelikedev-help Discord channel - many thanks!
+    let rdx = room.x2 - room.x1;
+    let rdy = room.y2 - room.y1;
+
+    let div_val = cmp::min(rdx, rdy);
+
+    let radius: f32 = (div_val as f32 / 2.0) - 1.0;
+    let rad_floor: i32 = radius.floor() as i32;
+    let radsqr = radius.floor().powf(2.0) as i32;
+    let (center_x, center_y) = room.center();
+
+    let x_ratio = cmp::max(rdx / rdy, 1);
+    let y_ratio = cmp::max(rdy / rdx, 1);
+
+    for x in center_x - rad_floor - 1..center_x + rad_floor + 1 {
+        for y in center_y - rad_floor - 1..center_y + rad_floor + 1 {
+            let dx = (x - center_x) / x_ratio;
+            let dy = (y - center_y) / y_ratio;
+            let distsqr = dx.pow(2) + dy.pow(2);
+            if distsqr < radsqr {
+                map[x as usize][y as usize] = Tile::empty();
+            }
         }
     }
 }
@@ -610,10 +737,299 @@ fn place_objects(room: Rect, objects: &mut Vec<Object>) {
     }
 }
 
+fn reveal_map(map: &mut Map) {
+    for x in 0..MAP_WIDTH {
+        for y in 0..MAP_HEIGHT {
+            map[x as usize][y as usize].explored = true;
+        }
+    }
+}
+
 fn get_new_object_id(objects: &Vec<Object>) -> i32 {
     let last_item = objects.last();
     match last_item {
         Some(n) => n.id + 1,
         None => 1,
     }
+}
+
+// The Hauberk Map Generater
+
+fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
+
+    let num_room_tries = 100;
+    let extra_connector_chance = 4;
+    //let room_extra_size = 0;
+    let winding_percent = 10;
+
+    let current_region: i32 = -1;
+
+    let mut map_width: i32 = MAP_WIDTH;
+    let mut map_height: i32 = MAP_HEIGHT;
+
+    if map_width % 2 == 0 {
+        map_width -= 1;
+    }
+
+    if map_height % 2 == 0 {
+        map_height -= 1;
+    }
+
+    let mut map = vec![vec![Tile::wall(); map_height as usize]; MAP_WIDTH as usize];
+
+    type VecRegion = Vec<Vec<i32>>;
+
+    let mut _regions = vec![vec![0; map_height as usize]; MAP_WIDTH as usize];
+
+    //fn on_decorate_room(room: Rect) {}
+
+    fn grow_maze(map: &mut Map, start: Point, current_region: i32, winding_percent: i32, _regions: &mut VecRegion) {
+        let mut cells = Vec::new();
+        let mut last_dir = (0, 0);
+
+        start_region(current_region);
+        carve(&start, map, _regions, current_region);
+
+        cells.push(start);
+
+        while !cells.is_empty() {
+            let cell = cells.last().unwrap();
+
+            let mut unmade_cells = Vec::new();
+            for d in Directions::iterator() {
+                let (dx, dy) = get_direction(d);
+                let target_pos: Point = Point::new(cell.x + dx, cell.y + dy);
+                if can_carve(map, target_pos, d) {
+                    unmade_cells.push((dx, dy));
+                }
+            }
+
+            if !unmade_cells.is_empty() {
+                let mut dir = (0, 0);
+                if unmade_cells.contains(&last_dir) && rand::thread_rng().gen_range(0, 100) > winding_percent {
+                    dir = last_dir;
+                } else {
+                    let dir_choice = unmade_cells.choose(&mut rand::thread_rng());
+                    match dir_choice {
+                        Some(d) => {dir = *d;}
+                        None => ()
+                    }
+                }
+
+                let close_pos = Point::new(cell.x + dir.0, cell.y + dir.1);
+                let far_pos = Point::new(cell.x + (dir.0 * 2), cell.y + (dir.1 * 2));
+                carve(&close_pos, map, _regions, current_region);
+                carve(&far_pos, map, _regions, current_region);
+
+                cells.push(far_pos);
+
+                last_dir = dir;
+
+            } else {
+                cells.pop();
+                last_dir = (0, 0);
+            }
+        }
+
+    }
+
+    fn add_rooms(objects: &mut Vec<Object>, map: &mut Map, tries: i32, current_region: i32, _regions: &mut VecRegion,
+                 map_width: i32, map_height: i32) {
+        let mut rooms = Vec::new();
+        for i in 0..=tries {
+            let w = rand::thread_rng().gen_range(ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
+            let h = rand::thread_rng().gen_range(ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
+            let x = (rand::thread_rng().gen_range(0, map_width - w - 1) / 2)* 2 + 1;
+            let y = (rand::thread_rng().gen_range(0, map_height - h - 1) / 2) * 2 + 1;
+
+            let new_room = Rect::new(x, y, w, h);
+
+            let failed = rooms
+            .iter()
+            .any(|other_room| new_room.intersects_with(other_room));
+
+            if rooms.is_empty() {
+                let room_center = new_room.center();
+                objects[PLAYER].set_pos(room_center.0, room_center.1);
+            }
+
+            if !failed {
+                place_objects(new_room, objects);
+                rooms.push(new_room);
+                start_region(current_region);
+                create_room_hauberk(&new_room, map, _regions, current_region);
+            }
+        }
+    }
+
+    fn connect_regions(map: &mut Map, _regions: &mut VecRegion, current_region: i32, extra_chance: i32,
+                       map_width: i32, map_height: i32) {
+        let mut connector_regions = HashMap::new();
+
+        for x in 1..map_width-1 {
+            for y in 1..map_height-1 {
+                if !map[x as usize][y as usize].block_sight { continue; }
+
+                let mut regions = Vec::new();
+                for d in Directions::iterator() {
+                    let (dx, dy) = get_direction(d);
+                    let region = _regions[(x + dx) as usize][(y + dy) as usize];
+                    regions.push(region);
+                }
+
+                if regions.len() < 2 { continue; }
+
+                connector_regions.insert(Point::new(x, y), regions);
+            }
+        }
+
+        let mut connectors: Vec<_> = connector_regions.keys().collect();
+
+        let mut merged = HashMap::new();
+        let mut open_regions = Vec::new();
+
+        for i in 0..current_region {
+            merged.insert(i, i);
+            open_regions.push(i);
+        }
+
+        while open_regions.len() > 1 {
+            let connector = connectors.choose(&mut rand::thread_rng());
+            let mut regions = Vec::new();
+            match connector {
+                Some(connector) => {
+                    add_junction(connector, map, _regions, current_region);
+                    for region in &connector_regions[connector] {
+                        let actual_region = merged[&region];
+                        regions.push(actual_region);
+                    }
+                    let dest = regions.first().unwrap().clone();
+                    let sources: Vec<_> = regions[1..].iter().collect();
+
+                    for i in 0..current_region {
+                        if sources.contains(&&merged[&i]) {
+                            merged.remove(&i);
+                            merged.insert(i, dest);
+                        }
+                    }
+
+                    for s in sources {
+                        let index = open_regions.iter().position(|x| *x == *s).unwrap();
+                        open_regions.remove(index);
+                    }
+
+                    let mut to_be_removed = Vec::new();
+                    for pos in &connectors {
+                        if distance(connector.x-pos.x, connector.y-pos.y) < 2.0 {
+                            to_be_removed.push(*pos);
+                            continue;
+                        }
+
+                        let mut local_regions = Vec::new();
+                        for r in &connector_regions[connector] {
+                            let region_actual = merged[&r];
+                            local_regions.push(region_actual);
+                        }
+
+                        if local_regions.len() > 1 { continue; }
+
+                        if rand::thread_rng().gen_range(0, 100) < extra_chance {
+                            add_junction(pos, map, _regions, current_region);
+                        }
+
+                        if local_regions.len() == 1 {
+                            to_be_removed.push(*pos);
+                        }
+                    }
+
+                    connectors.retain(|&x| !to_be_removed.contains(&x));
+                }
+                None => ()
+            }
+
+        }
+
+        
+    }
+
+    fn add_junction(pos: &Point, map: &mut Map, _regions: &mut VecRegion, current_region: i32) {
+        if rand::random::<f32>() < 0.25 {
+            carve(pos, map, _regions, current_region);
+        }
+    }
+
+    fn remove_dead_ends(map: &mut Map, map_width: i32, map_height: i32) {
+        let mut done = false;
+
+        while !done {
+            done = true;
+
+            for x in 1..map_width {
+                for y in 1..map_height {
+                    if map[x as usize][y as usize].block_sight { continue; }
+
+                    let mut exits = 0;
+                    for d in Directions::iterator() {
+                        let (dx, dy) = get_direction(d);
+                        let (target_x, target_y) = (x + dx, y + dy);
+                        if !map[target_x as usize][target_y as usize].block_sight { exits += 1; }
+                    }
+
+                    if exits != 1 { continue; }
+
+                    done = false;
+                    map[x as usize][y as usize] = Tile::wall();
+                }
+            }
+        }
+
+    }
+
+    fn can_carve(map: &mut Map, pos: Point, d: &Directions) -> bool {
+        let (dx, dy) = get_direction(d);
+        let test_point = (pos.x + (dx*3), pos.y + (dy*3));
+        if out_of_bounds(test_point.0, test_point.1) {
+            return false
+        }
+
+        let (target_x, target_y) = (pos.x + dx, pos.y + dy);
+
+        return map[target_x as usize][target_y as usize].block_sight;
+    }
+
+    fn start_region(i: i32) -> i32 {
+        i + 1
+    }
+
+    fn carve(pos: &Point, map: &mut Map, _regions: &mut VecRegion, current_region: i32) {
+        map[pos.x as usize][pos.y as usize] = Tile::empty();
+        //println!("Made ({}, {}) a floor tile", pos.x, pos.y);
+        _regions[pos.x as usize][pos.y as usize] = current_region;
+    }
+
+    fn create_room_hauberk(room: &Rect, map: &mut Map, _regions: &mut VecRegion, current_region: i32) {
+        for x in room.x1..room.x2 {
+            for y in room.y1..room.y2 {
+                let target_point = Point::new(x, y);
+                carve(&target_point, map, _regions, current_region);
+            }
+        }
+    }
+
+    add_rooms(objects, &mut map, num_room_tries, current_region, &mut _regions, map_width, map_height);
+
+    for y in (1..map_height).step_by(2) {
+        for x in (1..map_width).step_by(2) {
+            if !map[x as usize][y as usize].block_sight { continue ; }
+
+            let start = Point::new(x, y);
+            grow_maze(&mut map, start, current_region, winding_percent, &mut _regions);
+        }
+    }
+
+    connect_regions(&mut map, &mut _regions, current_region, extra_connector_chance, map_width, map_height);
+
+    remove_dead_ends(&mut map, map_width, map_height);
+
+    map
 }
