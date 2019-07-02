@@ -33,6 +33,9 @@ const GAME_DATA: &str = include_str!("data/gamedata.json");
 const BAR_WIDTH: i32 = 20;
 const PANEL_HEIGHT: i32 = 7;
 const PANEL_Y: i32 = SCREEN_HEIGHT - PANEL_HEIGHT;
+const MSG_X: i32 = BAR_WIDTH + 2;
+const MSG_WIDTH: i32 = SCREEN_WIDTH - BAR_WIDTH - 2;
+const MSG_HEIGHT: usize = PANEL_HEIGHT as usize - 1;
 
 
 // Data Types
@@ -135,19 +138,17 @@ impl Object {
         }
     }
 
-    pub fn attack(&mut self, target: &mut Object) {
+    pub fn attack(&mut self, target: &mut Object, messages: &mut Vec<Message>) {
         let damage = self.fighter.map_or(0, |f| f.power) - target.fighter.map_or(0, |f| f.defense);
         if damage > 0 {
-            println!(
-                "{} attacks {} for {} hit points",
-                self.name, target.name, damage
-            );
+            message(messages,
+                    format!("{} attacks {} for {} damage", self.name, target.name, damage),
+                    WHITE);
             target.take_damage(damage);
         } else {
-            println!(
-                "{} attacks {} but it has no effect!",
-                self.name, target.name
-            );
+            message(messages,
+                    format!("{} attacks {}, but it has no effect!", self.name, target.name),
+                    WHITE);
         }
     }
 }
@@ -268,6 +269,8 @@ fn extract_node_from_gamedata(node: &str) -> Result<Value> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Ai;
 
+type Message = (String, Color);
+
 
 // Main Function
 fn main() {
@@ -285,8 +288,13 @@ fn main() {
     let player = Object::new_player(0, 0, "player", '@', DARK_GREEN, 0, true, true);
 
     let mut objects = vec![player];
+    let mut messages: Vec<Message> = Vec::new();
     let mut map = make_map_hauberk(&mut objects);
     //let mut map = make_map(&mut objects);
+
+    message(&mut messages,
+            "Connection Initiated. Processing...",
+            YELLOW);
 
     let mut fov_map = FovMap::new(MAP_WIDTH, MAP_HEIGHT);
     create_fov(&mut fov_map, &map);
@@ -295,16 +303,16 @@ fn main() {
     while !root.window_closed() {
         con.clear();
         let fov_recompute = previous_player_position != (objects[PLAYER].pos());
-        render_all(&mut root, &mut con, &mut panel, &objects, &mut map, &mut fov_map, fov_recompute);
+        render_all(&mut root, &mut con, &mut panel, &objects, &mut map, &mut fov_map, fov_recompute, &mut messages);
         root.flush();
         previous_player_position = objects[PLAYER].pos();
-        let player_action = handle_keys(&mut root, &mut map, &mut objects);
+        let player_action = handle_keys(&mut root, &mut map, &mut objects, &mut messages);
         match player_action {
             PlayerAction::Exit => break,
             PlayerAction::TookTurn => {
                 for id in 0..objects.len() {
                     if objects[id].ai.is_some() {
-                        ai_take_turn(id, &map, &mut objects, &fov_map)
+                        ai_take_turn(id, &map, &mut objects, &fov_map, &mut messages)
                     }
                 }
             },
@@ -313,7 +321,7 @@ fn main() {
     }
 }
 
-fn handle_keys(root: &mut Root, map: &mut Map, objects: &mut [Object]) -> PlayerAction {
+fn handle_keys(root: &mut Root, map: &mut Map, objects: &mut [Object], messages: &mut Vec<Message>) -> PlayerAction {
     use tcod::input::Key;
     use tcod::input::KeyCode::*;
     use PlayerAction::*;
@@ -340,19 +348,19 @@ fn handle_keys(root: &mut Root, map: &mut Map, objects: &mut [Object]) -> Player
             NoTurn
         }
         (Key { code: Up, .. }, true) => {
-            player_move_or_attack(get_direction(&NORTH), map, objects);
+            player_move_or_attack(get_direction(&NORTH), map, objects, messages);
             TookTurn
         }
         (Key { code: Down, .. }, true) => {
-            player_move_or_attack(get_direction(&SOUTH), map, objects);
+            player_move_or_attack(get_direction(&SOUTH), map, objects, messages);
             TookTurn
         },
         (Key { code: Left, .. }, true) => {
-            player_move_or_attack(get_direction(&WEST), map, objects);
+            player_move_or_attack(get_direction(&WEST), map, objects, messages);
             TookTurn
         },
         (Key { code: Right, .. }, true) => {
-            player_move_or_attack(get_direction(&EAST), map, objects);
+            player_move_or_attack(get_direction(&EAST), map, objects, messages);
             TookTurn
         },
 
@@ -416,7 +424,7 @@ fn is_blocked(x: i32, y: i32, map: &Map, objects: &[Object]) -> bool {
 
 // Player Functions
 
-fn player_move_or_attack((dx, dy): (i32, i32), map: &Map, objects: &mut [Object]) {
+fn player_move_or_attack((dx, dy): (i32, i32), map: &Map, objects: &mut [Object], messages: &mut Vec<Message>) {
     let x = objects[PLAYER].x + dx;
     let y = objects[PLAYER].y + dy;
 
@@ -427,7 +435,7 @@ fn player_move_or_attack((dx, dy): (i32, i32), map: &Map, objects: &mut [Object]
     match target_id {
         Some(target_id) => {
             let (player, target) = mut_two(PLAYER, target_id, objects);
-            player.attack(target);
+            player.attack(target, messages);
         }
         None => {
             move_by(PLAYER, (dx, dy), map, objects);
@@ -444,7 +452,7 @@ fn player_death(player: &mut Object) {
 
 // AI Functions
 
-fn ai_take_turn(monster_id: usize, map: &Map, objects: &mut [Object], fov_map: &FovMap) {
+fn ai_take_turn(monster_id: usize, map: &Map, objects: &mut [Object], fov_map: &FovMap, messages: &mut Vec<Message>) {
     let (monster_x, monster_y) = objects[monster_id].pos();
     if fov_map.is_in_fov(monster_x, monster_y) {
         if objects[monster_id].distance_to(&objects[PLAYER]) >= 2.0 {
@@ -452,7 +460,7 @@ fn ai_take_turn(monster_id: usize, map: &Map, objects: &mut [Object], fov_map: &
             move_towards(monster_id, (player_x, player_y), map, objects);
         } else if objects[PLAYER].fighter.map_or(false, |f| f.hp > 0) {
             let (monster, player) = mut_two(monster_id, PLAYER, objects);
-            monster.attack(player);
+            monster.attack(player, messages);
         }
     }
 }
@@ -489,6 +497,7 @@ fn render_all(root: &mut Root,
     map: &mut Map,
     fov_map: &mut FovMap,
     fov_recompute: bool,
+    messages: &Vec<Message>,
 ) {
     if fov_recompute {
         let player = &objects[PLAYER];
@@ -554,6 +563,18 @@ fn render_all(root: &mut Root,
     );
 
     render_border(panel, DARKER_GREEN);
+
+    let mut y = MSG_HEIGHT as i32;
+    for &(ref msg, color) in messages.iter().rev() {
+        let msg_height = panel.get_height_rect(MSG_X, y, MSG_WIDTH, 0, msg);
+        y -= msg_height;
+        if y < 1 {
+            break;
+        }
+
+        panel.set_default_foreground(color);
+        panel.print_rect(MSG_X, y, MSG_WIDTH, 0, msg);
+    }
 
     blit(panel, (0, 0), (SCREEN_WIDTH, PANEL_HEIGHT), root, (0, PANEL_Y), 1.0, 1.0);
 
@@ -622,6 +643,14 @@ fn render_border(panel: &mut Offscreen, border_color: Color) {
         panel.put_char(0, y, 179u8 as char, BackgroundFlag::None);
         panel.put_char(MAP_WIDTH, y, 179u8 as char, BackgroundFlag::None);
     }
+}
+
+fn message<T: Into<String>>(messages: &mut Vec<Message>, message: T, color: Color) {
+    if messages.len() == MSG_HEIGHT {
+        messages.remove(0);
+    }
+
+    messages.push((message.into(), color));
 }
 
 
@@ -795,22 +824,7 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
 
     //fn on_decorate_room(room: Rect) {}
 
-    fn pcg_choose(v: &Vec<(i32, i32)>, r: &mut rand_pcg::Pcg32) -> Option<usize> {
-        if v.is_empty() {
-            return None
-        } else {
-            let vec_length: f64 = v.len() as f64;
-            let num_digits = vec_length.log10().round() as u32;
-            let modulo: u32 = (10 as u32).pow(num_digits);
-            let mut index_option = r.next_u32() % modulo;
-            while v.len()-1 < index_option as usize {
-                index_option = r.next_u32() % modulo;
-            }
-            return Some(index_option as usize)
-        }
-    }
-
-    fn pcg_choose_pt(v: &Vec<&Point>, r: &mut rand_pcg::Pcg32) -> Option<usize> {
+    fn pcg_choose<T>(v: &Vec<T>, r: &mut rand_pcg::Pcg32) -> Option<usize> {
         if v.is_empty() {
             return None
         } else {
@@ -962,7 +976,7 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
         //println!("{:?}", open_regions);
 
         while !open_regions.is_empty() {
-            let connector_idx = pcg_choose_pt(&connectors, r);
+            let connector_idx = pcg_choose(&connectors, r);
             let mut regions = Vec::new();
             match connector_idx {
                 Some(c) => {
