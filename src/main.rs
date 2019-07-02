@@ -114,7 +114,6 @@ impl Object {
     pub fn set_pos(&mut self, x: i32, y: i32) {
         self.x = x;
         self.y = y;
-        //println!("Position: ({}, {})", self.x, self.y);
     }
     
     pub fn distance_to(&self, other: &Object) -> f32 {
@@ -123,7 +122,7 @@ impl Object {
         distance(dx, dy)
     }
 
-    pub fn take_damage(&mut self, damage: i32) {
+    pub fn take_damage(&mut self, damage: i32, messages: &mut Vec<Message>) {
         if let Some(fighter) = self.fighter.as_mut() {
             if damage > 0 {
                 fighter.hp -= damage;
@@ -133,7 +132,7 @@ impl Object {
         if let Some(fighter) = self.fighter {
             if fighter.hp <= 0 {
                 self.alive = false;
-                fighter.on_death.callback(self);
+                fighter.on_death.callback(self, messages);
             }
         }
     }
@@ -144,7 +143,7 @@ impl Object {
             message(messages,
                     format!("{} attacks {} for {} damage", self.name, target.name, damage),
                     WHITE);
-            target.take_damage(damage);
+            target.take_damage(damage, messages);
         } else {
             message(messages,
                     format!("{} attacks {}, but it has no effect!", self.name, target.name),
@@ -249,13 +248,13 @@ enum DeathCallback {
 }
 
 impl DeathCallback {
-    fn callback(self, object: &mut Object) {
+    fn callback(self, object: &mut Object, messages: &mut Vec<Message>) {
         use DeathCallback::*;
-        let callback: fn(&mut Object) = match self {
+        let callback: fn(&mut Object, &mut Vec<Message>) = match self {
             Player => player_death,
             Monster => monster_death,
         };
-        callback(object);
+        callback(object, messages);
     }
 }
 
@@ -443,8 +442,10 @@ fn player_move_or_attack((dx, dy): (i32, i32), map: &Map, objects: &mut [Object]
     }
 }
 
-fn player_death(player: &mut Object) {
-    println!("You DIED");
+fn player_death(player: &mut Object, messages: &mut Vec<Message>) {
+    message(messages,
+            format!("Connection Lost... Retrying..."),
+            GREEN);
 
     player.character = '%';
     player.color = DARK_GREY;
@@ -465,8 +466,10 @@ fn ai_take_turn(monster_id: usize, map: &Map, objects: &mut [Object], fov_map: &
     }
 }
 
-fn monster_death(monster: &mut Object) {
-    println!("{} died!", monster.name);
+fn monster_death(monster: &mut Object, messages: &mut Vec<Message>) {
+    message(messages,
+            format!("{} died!", monster.name),
+            LIME);
     monster.character = '%';
     monster.color = DARK_GREY;
     monster.blocks = false;
