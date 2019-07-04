@@ -9,10 +9,10 @@ use std::collections::HashMap;
 use std::slice::Iter;
 use rand_core::RngCore;
 
-const SCREEN_WIDTH: i32 = 90;
+const SCREEN_WIDTH: i32 = 110;
 const SCREEN_HEIGHT: i32 = 50;
 const LIMIT_FPS: i32 = 20;
-const MAP_WIDTH: i32 = 80;
+const MAP_WIDTH: i32 = 79;
 const MAP_HEIGHT: i32 = 43;
 const COLOR_DARK_WALL: Color = Color {r: 10, g: 55, b: 10};
 const COLOR_LIGHT_WALL: Color = Color {r: 30, g: 100, b: 30};
@@ -26,6 +26,7 @@ const FOV_LIGHT_WALLS: bool = true;
 const TORCH_RADIUS: i32 = 3;
 
 const MAX_ROOM_MONSTERS: i32 = 3;
+const MAX_ROOM_ITEMS: i32 = 2;
 
 const PLAYER: usize = 0;
 const GAME_DATA: &str = include_str!("data/gamedata.json");
@@ -36,6 +37,11 @@ const PANEL_Y: i32 = SCREEN_HEIGHT - PANEL_HEIGHT;
 const MSG_X: i32 = BAR_WIDTH + 2;
 const MSG_WIDTH: i32 = SCREEN_WIDTH - BAR_WIDTH - 2;
 const MSG_HEIGHT: usize = PANEL_HEIGHT as usize - 1;
+const V_PANEL_WIDTH: i32 = SCREEN_WIDTH - MAP_WIDTH - 1;
+const V_PANEL_X: i32 = MAP_WIDTH + 1;
+const V_PANEL_HEIGHT: i32 = SCREEN_HEIGHT;
+
+const HEAL_AMOUNT: i32 = 4;
 
 
 // Data Types
@@ -63,11 +69,12 @@ struct Object {
     alive: bool,
     fighter: Option<Fighter>,
     ai: Option<Ai>,
+    item: Option<Item>,
 }
 
 impl Object {
     pub fn new(x: i32, y: i32, name: &str, ch: char, color: Color, id: i32, blocks: bool, alive: bool) -> Self {
-        Object { x, y, name: name.into(), character: ch, color, id, blocks, alive, fighter: None, ai: None }
+        Object { x, y, name: name.into(), character: ch, color, id, blocks, alive, fighter: None, ai: None, item: None }
     }
 
     pub fn new_player(x: i32, y: i32, name: &str, ch: char, color: Color, id: i32, blocks: bool, alive: bool) -> Self {
@@ -82,7 +89,8 @@ impl Object {
             blocks,
             alive,
             fighter: Some(player_fighter),
-            ai: None
+            ai: None,
+            item: None,
         }
     }
 
@@ -99,6 +107,24 @@ impl Object {
             alive,
             fighter: Some(monster_fighter),
             ai: Some(Ai),
+            item: None,
+        }
+    }
+
+    pub fn new_item(x: i32, y: i32, name: &str, ch: char, color: Color, id: i32, blocks: bool, alive: bool, item_type: Item) -> Self {
+        let item = Some(item_type);
+        Object {
+            x,
+            y,
+            name: name.into(),
+            character: ch,
+            color,
+            id,
+            blocks,
+            alive,
+            fighter: None,
+            ai: None,
+            item,
         }
     }
 
@@ -148,6 +174,15 @@ impl Object {
             message(messages,
                     format!("{} attacks {}, but it has no effect!", self.name, target.name),
                     WHITE);
+        }
+    }
+
+    pub fn heal(&mut self, amount: i32) {
+        if let Some(ref mut fighter) = self.fighter {
+            fighter.hp += amount;
+            if fighter.hp > fighter.max_hp {
+                fighter.hp = fighter.max_hp;
+            }
         }
     }
 }
@@ -270,6 +305,16 @@ struct Ai;
 
 type Message = (String, Color);
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Item {
+    Heal,
+}
+
+enum UseResult {
+    Used,
+    Cancelled,
+}
+
 
 // Main Function
 fn main() {
@@ -282,11 +327,13 @@ fn main() {
     
     let mut con = Offscreen::new(SCREEN_WIDTH, SCREEN_HEIGHT);
     let mut panel = Offscreen::new(SCREEN_WIDTH, PANEL_HEIGHT);
+    let mut v_panel = Offscreen::new(V_PANEL_WIDTH, V_PANEL_HEIGHT);
     
     tcod::system::set_fps(LIMIT_FPS);
     let player = Object::new_player(0, 0, "player", '@', DARK_GREEN, 0, true, true);
 
     let mut objects = vec![player];
+    let mut inventory: Vec<Object> = Vec::new();
     let mut messages: Vec<Message> = Vec::new();
     let mut map = make_map_hauberk(&mut objects);
     //let mut map = make_map(&mut objects);
@@ -302,10 +349,10 @@ fn main() {
     while !root.window_closed() {
         con.clear();
         let fov_recompute = previous_player_position != (objects[PLAYER].pos());
-        render_all(&mut root, &mut con, &mut panel, &objects, &mut map, &mut fov_map, fov_recompute, &mut messages);
+        render_all(&mut root, &mut con, &mut panel, &mut v_panel, &objects, &mut map, &mut fov_map, fov_recompute, &mut messages, &inventory);
         root.flush();
         previous_player_position = objects[PLAYER].pos();
-        let player_action = handle_keys(&mut root, &mut map, &mut objects, &mut messages);
+        let player_action = handle_keys(&mut root, &mut map, &mut objects, &mut messages, &mut inventory);
         match player_action {
             PlayerAction::Exit => break,
             PlayerAction::TookTurn => {
@@ -320,7 +367,7 @@ fn main() {
     }
 }
 
-fn handle_keys(root: &mut Root, map: &mut Map, objects: &mut [Object], messages: &mut Vec<Message>) -> PlayerAction {
+fn handle_keys(root: &mut Root, map: &mut Map, objects: &mut Vec<Object>, messages: &mut Vec<Message>, inventory: &mut Vec<Object>) -> PlayerAction {
     use tcod::input::Key;
     use tcod::input::KeyCode::*;
     use PlayerAction::*;
@@ -362,6 +409,15 @@ fn handle_keys(root: &mut Root, map: &mut Map, objects: &mut [Object], messages:
             player_move_or_attack(get_direction(&EAST), map, objects, messages);
             TookTurn
         },
+        (Key { printable: ',', ..}, true) => {
+            let item_id = objects
+                .iter()
+                .position(|object| object.pos() == objects[PLAYER].pos() && object.item.is_some());
+            if let Some(item_id) = item_id {
+                pick_up_item(item_id, objects, inventory, messages);
+            }
+            NoTurn
+        }
 
         _ => NoTurn,
     }
@@ -451,6 +507,64 @@ fn player_death(player: &mut Object, messages: &mut Vec<Message>) {
     player.color = DARK_GREY;
 }
 
+fn pick_up_item(object_id: usize, objects: &mut Vec<Object>, inventory: &mut Vec<Object>, messages: &mut Vec<Message>) {
+    if inventory.len() >= 26 {
+        message(
+            messages,
+            format!("No space in local filesystem! Cannot pick up `{}`.", objects[object_id].name),
+            YELLOW
+        );
+    } else {
+        let item = objects.swap_remove(object_id);
+        message(
+            messages,
+            format!("Moved file: `{}` to local filesystem.", item.name),
+            GREEN,
+        );
+        inventory.push(item);
+    }
+}
+
+fn use_item(inventory_id: usize, inventory: &mut Vec<Object>, objects: &mut [Object], messages: &mut Vec<Message>) {
+    use Item::*;
+
+    if let Some(item) = inventory[inventory_id].item {
+        let on_use = match item {
+            Heal => cast_heal,
+        };
+        match on_use(inventory_id, objects, messages) {
+            UseResult::Used => {
+                inventory.remove(inventory_id);
+            },
+            UseResult::Cancelled => {
+                message(messages, "Cancelled Item Use", WHITE);
+            },
+        }
+    } else {
+        message(
+            messages,
+            format!("The {} cannot be used.", inventory[inventory_id].name),
+            WHITE
+        );
+    }
+}
+
+fn cast_heal(_inventory_id: usize, objects: &mut [Object], messages: &mut Vec<Message>) -> UseResult {
+    if let Some(fighter) = objects[PLAYER].fighter {
+        if fighter.hp == fighter.max_hp {
+            message(messages, "Connection strength at maximum...", GREEN);
+            return UseResult::Cancelled;
+        }
+        message(
+            messages,
+            "Connection to server strengthened.",
+            DARKER_GREEN);
+        objects[PLAYER].heal(HEAL_AMOUNT);
+        return UseResult::Used;
+    }
+    UseResult::Cancelled
+}
+
 // AI Functions
 
 fn ai_take_turn(monster_id: usize, map: &Map, objects: &mut [Object], fov_map: &FovMap, messages: &mut Vec<Message>) {
@@ -496,11 +610,13 @@ fn mut_two<T>(first_index: usize, second_index: usize, items: &mut [T]) -> (&mut
 fn render_all(root: &mut Root,
     con: &mut Offscreen, 
     panel: &mut Offscreen,
+    v_panel: &mut Offscreen,
     objects: &[Object], 
     map: &mut Map,
     fov_map: &mut FovMap,
     fov_recompute: bool,
     messages: &Vec<Message>,
+    inventory: &Vec<Object>,
 ) {
     if fov_recompute {
         let player = &objects[PLAYER];
@@ -538,6 +654,7 @@ fn render_all(root: &mut Root,
         }
     }
 
+    // Rendering Objects
     let mut to_draw: Vec<_> = objects
         .iter()
         .filter(|o| fov_map.is_in_fov(o.x, o.y))
@@ -547,17 +664,20 @@ fn render_all(root: &mut Root,
         object.draw(con);
     }
 
+    // Bottom Panel
     panel.set_default_background(BLACK);
     panel.clear();
 
     let hp = objects[PLAYER].fighter.map_or(0, |f| f.hp);
     let max_hp = objects[PLAYER].fighter.map_or(0, |f| f.max_hp);
+    panel.set_default_foreground(DARKER_GREEN);
+    panel.print(1, 1, "Connection Strength");
     render_bar(
         panel,
         1,
-        1,
+        2,
         BAR_WIDTH,
-        "HP",
+        None,
         hp,
         max_hp,
         LIGHT_YELLOW,
@@ -565,7 +685,7 @@ fn render_all(root: &mut Root,
         DARKEST_GREY,
     );
 
-    render_border(panel, DARKER_GREEN);
+    render_border(panel, DARKER_GREEN, MAP_WIDTH, PANEL_HEIGHT);
 
     let mut y = MSG_HEIGHT as i32;
     for &(ref msg, color) in messages.iter().rev() {
@@ -579,9 +699,36 @@ fn render_all(root: &mut Root,
         panel.print_rect(MSG_X, y, MSG_WIDTH, 0, msg);
     }
 
+    // Right-Side Panel
+
+    v_panel.set_default_background(BLACK);
+    v_panel.clear();
+
+    v_panel.set_default_foreground(DARK_GREEN);
+    v_panel.print_ex(2, 2, BackgroundFlag::None, TextAlignment::Left, "Current Server");
+    v_panel.print_ex(2, 3, BackgroundFlag::None, TextAlignment::Left, format!("{}", 0x844cfa4bf95ef68 as u64));
+
+    v_panel.print_ex(2, 7, BackgroundFlag::None, TextAlignment::Left, "Available Files");
+    let mut inv_y = 8 as i32;
+    v_panel.set_default_foreground(GREEN);
+    for item in inventory.iter() {
+        v_panel.print_ex(2, inv_y, BackgroundFlag::None, TextAlignment::Left, &item.name);
+        inv_y += 1;
+    }
+
+    let (player_x, player_y) = objects[PLAYER].pos();
+    v_panel.print_ex(5, SCREEN_HEIGHT - 3, BackgroundFlag::None, TextAlignment::Left, "Current Position");
+    v_panel.print_ex(10, SCREEN_HEIGHT - 2, BackgroundFlag::None, TextAlignment::Left, format!("({}, {})", player_x, player_y));
+
+    render_border(v_panel, DARKER_GREEN, V_PANEL_WIDTH-1, V_PANEL_HEIGHT);
+
+    // Send panels to screen
+
     blit(panel, (0, 0), (SCREEN_WIDTH, PANEL_HEIGHT), root, (0, PANEL_Y), 1.0, 1.0);
 
     blit(con, (0, 0), (MAP_WIDTH, MAP_HEIGHT), root, (0, 0), 1.0, 1.0);
+
+    blit(v_panel, (0, 0), (V_PANEL_WIDTH, V_PANEL_HEIGHT), root, (V_PANEL_X, 0), 1.0, 1.0);
 }
 
 fn create_fov(fov: &mut FovMap, map: &Map) {
@@ -602,7 +749,7 @@ fn render_bar(
     x: i32,
     y: i32,
     total_width: i32,
-    name: &str,
+    name: Option<String>,
     value: i32,
     maximum: i32,
     bar_color: Color,
@@ -620,31 +767,34 @@ fn render_bar(
     }
 
     panel.set_default_foreground(text_color);
-    panel.print_ex(
-        x + total_width / 2,
-        y,
-        BackgroundFlag::None,
-        TextAlignment::Center,
-        &format!("{}: {}/{}", name, value, maximum),
-    );
+    if name.is_some() {
+        panel.print_ex(
+            x + total_width / 2,
+            y,
+            BackgroundFlag::None,
+            TextAlignment::Center,
+            &format!("{}: {}/{}", name.unwrap(), value, maximum),
+        );
+    }
+
 }
 
-fn render_border(panel: &mut Offscreen, border_color: Color) {
+fn render_border(panel: &mut Offscreen, border_color: Color, width: i32, height: i32) {
     panel.set_default_foreground(border_color);
     // Add the 4 corners
     panel.put_char(0, 0, 218u8 as char, BackgroundFlag::None);
-    panel.put_char(MAP_WIDTH, 0, 191u8 as char, BackgroundFlag::None);
-    panel.put_char(0, PANEL_HEIGHT-1, 192u8 as char, BackgroundFlag::None);
-    panel.put_char(MAP_WIDTH, PANEL_HEIGHT-1, 217u8 as char, BackgroundFlag::None);
+    panel.put_char(width, 0, 191u8 as char, BackgroundFlag::None);
+    panel.put_char(0, height - 1, 192u8 as char, BackgroundFlag::None);
+    panel.put_char(width, height - 1, 217u8 as char, BackgroundFlag::None);
 
     // Draw top and bottom lines
-    for x in 1..MAP_WIDTH {
+    for x in 1..(width) {
         panel.put_char(x, 0, 196u8 as char, BackgroundFlag::None);
-        panel.put_char(x, PANEL_HEIGHT-1, 196u8 as char, BackgroundFlag::None);
+        panel.put_char(x, height - 1, 196u8 as char, BackgroundFlag::None);
     }
-    for y in 1..PANEL_HEIGHT-1 {
+    for y in 1..(height - 1) {
         panel.put_char(0, y, 179u8 as char, BackgroundFlag::None);
-        panel.put_char(MAP_WIDTH, y, 179u8 as char, BackgroundFlag::None);
+        panel.put_char(width, y, 179u8 as char, BackgroundFlag::None);
     }
 }
 
@@ -683,7 +833,7 @@ fn make_map(objects: &mut Vec<Object>) -> Map {
                 create_room(new_room, &mut map);
             }
             let room_center = new_room.center();
-            place_objects(new_room, objects);
+            place_objects(new_room, objects, &mut map);
 
             if rooms.is_empty() {
                 objects[PLAYER].set_pos(room_center.0, room_center.1);
@@ -752,7 +902,7 @@ fn create_v_tunnel(y1: i32, y2: i32, x: i32, map: &mut Map) {
     }
 }
 
-fn place_objects(room: Rect, objects: &mut Vec<Object>) {
+fn place_objects(room: Rect, objects: &mut Vec<Object>, map: &mut Map) {
     let num_monsters = rand::thread_rng().gen_range(0, MAX_ROOM_MONSTERS + 1);
 
     for _ in 0..num_monsters {
@@ -766,6 +916,19 @@ fn place_objects(room: Rect, objects: &mut Vec<Object>) {
         };
 
         objects.push(monster);
+    }
+
+    let num_items = rand::thread_rng().gen_range(0, MAX_ROOM_ITEMS + 1);
+    //println!("Num items: {}", num_items);
+
+    for _ in 0..num_items {
+        let x = rand::thread_rng().gen_range(room.x1 + 1, room.x2);
+        let y = rand::thread_rng().gen_range(room.y1 + 1, room.y2);
+
+        let object = Object::new_item(x, y, "Tracert Script", '!', DARK_GREEN, get_new_object_id(&objects), false, false, Item::Heal);
+        objects.push(object);
+        //println!("Placed item at ({}, {})", x, y);
+
     }
 }
 
@@ -932,7 +1095,7 @@ fn make_map_hauberk(objects: &mut Vec<Object>) -> Map {
             }
 
             if !failed {
-                place_objects(new_room, objects);
+                place_objects(new_room, objects, map);
                 rooms.push(new_room);
                 start_region(current_region);
                 create_room_hauberk(&new_room, map, _regions, current_region);
