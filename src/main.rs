@@ -1,13 +1,15 @@
 use tcod::colors::*;
 use tcod::console::*;
 use tcod::map::{FovAlgorithm, Map as FovMap};
+use tcod::input::{self, Event, Key};
 use std::cmp;
 use rand::Rng;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize};
 use serde_json::{Result, Value};
 use std::collections::HashMap;
 use std::slice::Iter;
 use rand_core::RngCore;
+use std::fmt;
 
 const SCREEN_WIDTH: i32 = 110;
 const SCREEN_HEIGHT: i32 = 50;
@@ -35,7 +37,7 @@ const BAR_WIDTH: i32 = 20;
 const PANEL_HEIGHT: i32 = 7;
 const PANEL_Y: i32 = SCREEN_HEIGHT - PANEL_HEIGHT;
 const MSG_X: i32 = BAR_WIDTH + 2;
-const MSG_WIDTH: i32 = SCREEN_WIDTH - BAR_WIDTH - 2;
+const MSG_WIDTH: i32 = SCREEN_WIDTH - BAR_WIDTH - V_PANEL_WIDTH - 2;
 const MSG_HEIGHT: usize = PANEL_HEIGHT as usize - 1;
 const V_PANEL_WIDTH: i32 = SCREEN_WIDTH - MAP_WIDTH - 1;
 const V_PANEL_X: i32 = MAP_WIDTH + 1;
@@ -70,11 +72,12 @@ struct Object {
     fighter: Option<Fighter>,
     ai: Option<Ai>,
     item: Option<Item>,
+    item_type: Option<ItemType>,
 }
 
 impl Object {
     pub fn new(x: i32, y: i32, name: &str, ch: char, color: Color, id: i32, blocks: bool, alive: bool) -> Self {
-        Object { x, y, name: name.into(), character: ch, color, id, blocks, alive, fighter: None, ai: None, item: None }
+        Object { x, y, name: name.into(), character: ch, color, id, blocks, alive, fighter: None, ai: None, item: None, item_type: None }
     }
 
     pub fn new_player(x: i32, y: i32, name: &str, ch: char, color: Color, id: i32, blocks: bool, alive: bool) -> Self {
@@ -91,6 +94,7 @@ impl Object {
             fighter: Some(player_fighter),
             ai: None,
             item: None,
+            item_type: None,
         }
     }
 
@@ -108,11 +112,14 @@ impl Object {
             fighter: Some(monster_fighter),
             ai: Some(Ai),
             item: None,
+            item_type: None,
         }
     }
 
-    pub fn new_item(x: i32, y: i32, name: &str, ch: char, color: Color, id: i32, blocks: bool, alive: bool, item_type: Item) -> Self {
-        let item = Some(item_type);
+    pub fn new_item(x: i32, y: i32, name: &str, ch: char, color: Color, id: i32, blocks: bool, alive: bool, item_function: Item,
+                    item_type: ItemType) -> Self {
+        let item_func = Some(item_function);
+        let item_t = Some(item_type);
         Object {
             x,
             y,
@@ -124,7 +131,8 @@ impl Object {
             alive,
             fighter: None,
             ai: None,
-            item,
+            item: item_func,
+            item_type: item_t,
         }
     }
 
@@ -310,9 +318,28 @@ enum Item {
     Heal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ItemType {
+    Script,
+    //App,
+}
+
+impl fmt::Display for ItemType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            ItemType::Script => write!(f, "Script"),
+        }
+    }
+}
+
 enum UseResult {
     Used,
     Cancelled,
+}
+
+enum CommandType<T, E> {
+    Execute(T),
+    Invalid(E),
 }
 
 
@@ -346,13 +373,22 @@ fn main() {
     create_fov(&mut fov_map, &map);
 
     let mut previous_player_position = (-1, -1);
+
+    let mut key: Key = Default::default();
+
     while !root.window_closed() {
         con.clear();
+
+        match input::check_for_event(input::KEY_PRESS) {
+            Some((_, Event::Key(k))) => key = k,
+            _ => key = Default::default(),
+        }
+
         let fov_recompute = previous_player_position != (objects[PLAYER].pos());
         render_all(&mut root, &mut con, &mut panel, &mut v_panel, &objects, &mut map, &mut fov_map, fov_recompute, &mut messages, &inventory);
         root.flush();
         previous_player_position = objects[PLAYER].pos();
-        let player_action = handle_keys(&mut root, &mut map, &mut objects, &mut messages, &mut inventory);
+        let player_action = handle_keys(key, &mut root, &mut map, &mut objects, &mut messages, &mut inventory);
         match player_action {
             PlayerAction::Exit => break,
             PlayerAction::TookTurn => {
@@ -367,14 +403,20 @@ fn main() {
     }
 }
 
-fn handle_keys(root: &mut Root, map: &mut Map, objects: &mut Vec<Object>, messages: &mut Vec<Message>, inventory: &mut Vec<Object>) -> PlayerAction {
-    use tcod::input::Key;
+fn handle_keys(key: Key, 
+    root: &mut Root, 
+    map: &mut Map, 
+    objects: &mut Vec<Object>, 
+    messages: &mut Vec<Message>, 
+    inventory: &mut Vec<Object>) 
+    -> PlayerAction {
+
     use tcod::input::KeyCode::*;
     use PlayerAction::*;
     use Directions::*;
 
     let player_alive = objects[PLAYER].alive;
-    let key = root.wait_for_keypress(true);
+    //let key = root.wait_for_keypress(true);
     match (key, player_alive) {
        (Key {
             code: Enter,
@@ -417,6 +459,44 @@ fn handle_keys(root: &mut Root, map: &mut Map, objects: &mut Vec<Object>, messag
                 pick_up_item(item_id, objects, inventory, messages);
             }
             NoTurn
+        },
+        (Key { printable: '`', ..}, true) => {
+            let command = command_prompt(root);
+            match command {
+                Some(cmd) => { 
+                    let parsed = parse_command(cmd);
+                    match parsed {
+                        CommandType::Execute(c) => {
+                            let index = get_inventory_item_by_name(inventory, &c);
+                            match index {
+                                Some(i) => { 
+                                    use_item(i, inventory, objects, messages);
+                                    return TookTurn
+                                }
+                                None => { message(
+                                    messages,
+                                    "File Not Found",
+                                    YELLOW
+                                    );
+                                    return NoTurn
+                                }
+                            };
+                        },
+                        CommandType::Invalid(_) => {
+                            message(
+                                messages,
+                                "Invalid Command Entered",
+                                YELLOW
+                            );
+                        }
+                    }
+                 },
+                None => { 
+                    //println!("Error encountered"); 
+                    return NoTurn
+                }
+            }
+            TookTurn
         }
 
         _ => NoTurn,
@@ -563,6 +643,31 @@ fn cast_heal(_inventory_id: usize, objects: &mut [Object], messages: &mut Vec<Me
         return UseResult::Used;
     }
     UseResult::Cancelled
+}
+
+fn parse_command(command: String) -> CommandType<String, &'static str> {
+    let parts = command.split(" ");
+    let collected = parts.collect::<Vec<&str>>();
+
+    if collected.len() < 1 {
+        return CommandType::Invalid("Invalid Command");
+    } else {
+        match collected[0] {
+            "exec" => {
+                let return_value = collected[1];
+                CommandType::Execute(return_value.to_string())
+            }
+            _ => CommandType::Invalid("Invalid Command"),
+        }
+    }
+}
+
+fn get_inventory_item_by_name(inventory: &mut Vec<Object>, item: &str) -> Option<usize> {
+    let index = inventory.iter().position(|r| r.name.to_ascii_lowercase() == item.to_ascii_lowercase());
+    match index {
+        Some(i) => Some(i),
+        None => None,
+    }
 }
 
 // AI Functions
@@ -712,13 +817,13 @@ fn render_all(root: &mut Root,
     let mut inv_y = 8 as i32;
     v_panel.set_default_foreground(GREEN);
     for item in inventory.iter() {
-        v_panel.print_ex(2, inv_y, BackgroundFlag::None, TextAlignment::Left, &item.name);
+        v_panel.print_ex(2, inv_y, BackgroundFlag::None, TextAlignment::Left, format!("{} :: {}", &item.name, item.item_type.unwrap()));
         inv_y += 1;
     }
 
     let (player_x, player_y) = objects[PLAYER].pos();
-    v_panel.print_ex(5, SCREEN_HEIGHT - 3, BackgroundFlag::None, TextAlignment::Left, "Current Position");
-    v_panel.print_ex(10, SCREEN_HEIGHT - 2, BackgroundFlag::None, TextAlignment::Left, format!("({}, {})", player_x, player_y));
+    v_panel.print_ex(V_PANEL_WIDTH / 2, SCREEN_HEIGHT - 3, BackgroundFlag::None, TextAlignment::Center, "Current Position");
+    v_panel.print_ex(V_PANEL_WIDTH / 2, SCREEN_HEIGHT - 2, BackgroundFlag::None, TextAlignment::Center, format!("({}, {})", player_x, player_y));
 
     render_border(v_panel, DARKER_GREEN, V_PANEL_WIDTH-1, V_PANEL_HEIGHT);
 
@@ -804,6 +909,104 @@ fn message<T: Into<String>>(messages: &mut Vec<Message>, message: T, color: Colo
     }
 
     messages.push((message.into(), color));
+}
+
+fn menu<T: AsRef<str>>(header: &str, options: &[T], width: i32, root: &mut Root) -> Option<usize> {
+    assert!(options.len() <= 26,
+    "Cannot have a menu with more than 26 options");
+
+    let header_height = root.get_height_rect(0, 0, width, SCREEN_HEIGHT, header);
+    let height = options.len() as i32 + header_height;
+
+    let mut window = Offscreen::new(width, height);
+    window.set_default_foreground(WHITE);
+    window.print_rect_ex(
+        0,
+        0,
+        width,
+        height,
+        BackgroundFlag::None,
+        TextAlignment::Left,
+        header,
+    );
+
+    for (index, option_text) in options.iter().enumerate() {
+        let menu_letter = (b'a' + index as u8) as char;
+        let text = format!("({}) {}", menu_letter, option_text.as_ref());
+        window.print_ex(
+            0,
+            header_height + index as i32,
+            BackgroundFlag::None,
+            TextAlignment::Left,
+            text,
+        );
+    }
+
+    let x = SCREEN_WIDTH / 2 - width / 2;
+    let y = SCREEN_HEIGHT / 2 - height / 2;
+    blit(&mut window, (0, 0), (width, height), root, (x, y), 1.0, 0.7);
+
+    root.flush();
+    let key = root.wait_for_keypress(true);
+
+    if key.printable.is_alphabetic() {
+        let index = key.printable.to_ascii_lowercase() as usize - 'a' as usize;
+        if index < options.len() {
+            Some(index)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+fn command_prompt(root: &mut Root) -> Option<String> {
+    let mut prompt = Offscreen::new(MSG_WIDTH, 1);
+    let cmd_prompt = vec![':', '>', ' ', '_'];
+    let mut command = String::new();
+
+    let mut x = 0;
+    prompt.set_default_foreground(GREEN);
+    for ch in cmd_prompt.iter() {
+        prompt.put_char(x, 0, *ch, BackgroundFlag::None);
+        x += 1;
+    }
+    blit(&mut prompt, (0, 0), (MSG_WIDTH, 1), root, (MSG_X, PANEL_Y + 1), 1.0, 1.0);
+
+    root.flush();
+    let mut key = root.wait_for_keypress(true);
+
+    let mut cursor_x: usize = 3;
+    let cursor: char = '_';
+
+    while key.code != tcod::input::KeyCode::Enter {
+        if key.code == tcod::input::KeyCode::Escape {
+            return None
+        }
+
+        if key.printable.is_alphanumeric() || key.printable == ' ' {
+            let ch = key.printable.to_ascii_lowercase();
+            cursor_x += 1;
+            prompt.put_char(cursor_x as i32 - 1, 0, ch, BackgroundFlag::None);
+            prompt.put_char(cursor_x as i32, 0, cursor, BackgroundFlag::None);
+
+            command.push(ch);
+        } 
+        
+        if key.code == tcod::input::KeyCode::Backspace && cursor_x > 3 {
+            prompt.put_char(cursor_x as i32, 0, ' ', BackgroundFlag::None);
+            cursor_x -= 1;
+            prompt.put_char(cursor_x as i32, 0, cursor, BackgroundFlag::None);
+            command.pop();
+        }
+
+        blit(&mut prompt, (0, 0), (MSG_WIDTH, 1), root, (MSG_X, PANEL_Y + 1), 1.0, 1.0);
+        root.flush();
+        key = root.wait_for_keypress(true);
+
+    }
+    Some(command)
 }
 
 
@@ -925,7 +1128,17 @@ fn place_objects(room: Rect, objects: &mut Vec<Object>, map: &mut Map) {
         let x = rand::thread_rng().gen_range(room.x1 + 1, room.x2);
         let y = rand::thread_rng().gen_range(room.y1 + 1, room.y2);
 
-        let object = Object::new_item(x, y, "Tracert Script", '!', DARK_GREEN, get_new_object_id(&objects), false, false, Item::Heal);
+        let object = Object::new_item(
+            x, 
+            y, 
+            "Tracert", 
+            '!', 
+            DARK_GREEN, 
+            get_new_object_id(&objects), 
+            false, 
+            false, 
+            Item::Heal,
+            ItemType::Script);
         objects.push(object);
         //println!("Placed item at ({}, {})", x, y);
 
