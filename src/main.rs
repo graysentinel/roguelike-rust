@@ -349,7 +349,7 @@ fn main() {
         .font("consolas12x12_gs_tc.png", FontLayout::Tcod)
         .font_type(FontType::Greyscale)
         .size(SCREEN_WIDTH, SCREEN_HEIGHT)
-        .title("Rust/libtcod tutorial")
+        .title("Connection Lost")
         .init();
     
     let mut con = Offscreen::new(SCREEN_WIDTH, SCREEN_HEIGHT);
